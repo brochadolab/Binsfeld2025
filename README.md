@@ -1,2 +1,2 @@
-# Binsfeld2024
-Code for analyzing Binsfeld2024 et al 
+# Binsfeld2025
+Code for analyzing data from publication Binsfeld et al, PLOS Biology, 2025
