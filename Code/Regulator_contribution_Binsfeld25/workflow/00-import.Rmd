@@ -1,0 +1,61 @@
+---
+title: "00-import"
+date: "Compiled at `r format(Sys.time(), '%Y-%m-%d %H:%M:%S', tz = 'UTC')` UTC"
+output: github_document
+params:
+  name: "00-import" # change if you rename file
+---
+
+```{r here, message=FALSE}
+here::i_am(paste0(params$name, ".Rmd"), uuid = "716af71f-d7f8-4fa3-b34f-babf5d3a1051")
+```
+
+The purpose of this document is to copy the data files from the raw data directory to the target directory, so that they can be used in the workflow. The files copied include CPI scores and Map files.
+
+```{r packages}
+library("tidyverse")
+```
+
+```{r directories}
+# create or *empty* the target directory, used to write this file's data: 
+projthis::proj_create_dir_target(params$name, clean = TRUE)
+
+# function to get path to target directory: path_target("sample.csv")
+path_target <- projthis::proj_path_target(params$name)
+
+# function to get path to previous data: path_source("00-import", "sample.csv")
+path_source <- projthis::proj_path_source(params$name)
+```
+
+## CPI scores
+
+```{r list_target_files}
+INDIR <- "../CPI_scores"
+
+score_files <- list.files(INDIR, full.names = TRUE)
+score_files
+
+```
+
+
+
+```{r copy_files}
+
+file.copy(score_files, path_target())
+
+```
+
+## Files written
+
+These files have been written to the target directory, ```r paste0("data/", params$name)```:
+
+```{r list-files-target}
+projthis::proj_dir_info(path_target())
+```
+
+
+## Session Info
+  
+```{r sess.info}
+sessionInfo()
+```

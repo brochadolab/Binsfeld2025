@@ -1,0 +1,1703 @@
+---
+title: "02-expression_modeling"
+date: "Compiled at `r format(Sys.time(), '%Y-%m-%d %H:%M:%S', tz = 'UTC')` UTC"
+output: github_document
+params:
+  name: "02-expression_modeling" # change if you rename file
+---
+
+```{r here, message=FALSE}
+here::i_am(paste0(params$name, ".Rmd"), uuid = "c5d93672-e270-4134-9a86-a53278241fb0")
+```
+
+The purpose of this document is to perform our hierarchical interaction modeling strategy.
+
+```{r packages}
+library(tidyverse)
+
+```
+
+```{r directories}
+# create or *empty* the target directory, used to write this file's data: 
+projthis::proj_create_dir_target(params$name, clean = TRUE)
+
+# function to get path to target directory: path_target("sample.csv")
+path_target <- projthis::proj_path_target(params$name)
+
+# function to get path to previous data: path_source("00-import", "sample.csv")
+path_source <- projthis::proj_path_source(params$name)
+```
+
+## Read Data
+
+First we read in the scores that we normalised in the previous step. We can also get more information about the drugs by reading the **Map.txt** file.
+
+```{r read_data}
+
+normed_scores <- read_tsv(path_source("01-data_exploration", "qnormed_scores_complete.tsv.gz")) %>%
+  mutate(promoter_rep = paste(promoter, replicate, sep="_"))
+
+map_file <- read_tsv(path_source("00-import", "Map.txt"))
+
+map_file
+
+```
+
+
+
+We can combine with the information we have in normed_scores
+
+```{r}
+concentration_info <- map_file %>% 
+  mutate(chem_conc = paste(Drug, ConcMock, sep=":")) %>% 
+  select(chem_conc, Conc)
+```
+
+
+Now it becomes important to see how many measurements we have for a given prediction task. Say we want to evaluate the effect that caffeine has on micF. How many measurements do we have?
+
+```{r}
+normed_scores %>% 
+  dplyr::filter(promoter == "pmicF" & chem_name == "Caffeine") %>% 
+  nrow()
+```
+
+It seems that there are 32 measurements. Keeping in mind that this is an ideal scenario where all measurements are valid.
+
+## Water normalisation
+
+The first thing we need is a baseline expression value. We can view the values for Water as our reference
+
+```{r water_distrib}
+normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2")) %>% 
+  
+  ggplot(aes(y=chem_name, x=value, fill=chem_name)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width=0.1, fill="white") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("Water score distribution")
+```
+
+We can take a closer look at the comparison of Water Scores
+
+
+```{r water_scores.grid, out.width='100%'}
+
+normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2") & promoter== "pmicF") %>% 
+  mutate(chem_conc = paste(chem_name, concentration, sep=":")) %>% 
+  
+  ggplot(aes(x=genotype_rep, y=value, group=chem_conc, color=concentration)) +
+  geom_line(aes(linetype=chem_name)) +
+  geom_point() +
+  facet_wrap(~chem_name) +
+  theme_light( ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "Water Scores for micF",
+       x="Genotype_replicate",
+       y="Normalised Score")
+  
+  
+  
+normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2") & promoter== "pmicF") %>% 
+  mutate(concentration=factor(concentration, levels=c(1, 2, 3, 4))) %>% 
+  
+  ggplot(aes(x=genotype_rep, y=value, group=chem_name, color=chem_name)) +
+  geom_line(aes(linetype=chem_name)) +
+  geom_point() +
+  theme_light( ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  facet_wrap(~concentration, ncol = 2) +
+  labs(title = "Water Scores for micF",
+       x="Genotype_replicate",
+       y="Normalised Score")
+
+```
+  
+We take a look at this for all promoters
+
+
+```{r water.grid, out.width='100%', echo=FALSE}
+
+
+normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2")) %>% 
+  mutate(concentration=factor(concentration, levels=c(1, 2, 3, 4))) %>% 
+  
+  ggplot(aes(x=genotype_rep, y=value, group=chem_name, color=chem_name)) +
+  geom_line(aes(linetype=chem_name)) +
+  geom_point() +
+  theme_light( ) +
+  facet_grid(promoter~concentration) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+
+  labs(title = "Water Scores for all promoters",
+       subtitle = "Same Y scale",
+       x="Genotype_replicate",
+       y="Normalised Score")
+
+
+normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2")) %>% 
+  mutate(concentration=factor(concentration, levels=c(1, 2, 3, 4))) %>% 
+  
+  ggplot(aes(x=genotype_rep, y=value, group=chem_name, color=chem_name)) +
+  geom_line(aes(linetype=chem_name)) +
+  geom_point() +
+  theme_light( ) +
+  facet_grid(promoter~concentration, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+
+  labs(title = "Water Scores for all promoters",
+       subtitle = "Free Y scale",
+       x="Genotype_replicate",
+       y="Normalised Score")
+```
+    
+
+
+```{r normed_scores}
+
+normed_scores <- normed_scores %>% 
+  mutate(chem_conc_genotype = paste(chem_name, concentration, genotype, sep="_")) %>% 
+  left_join(concentration_info, by="chem_conc") %>% 
+  mutate(Conc = if_else(is.na(Conc), 0, Conc))
+```
+
+
+One example this is the pattern of expression that we see for Adrenalin and micF
+
+```{r}
+promoter_name <- "pmicF"
+compound <- "Adrenalin"
+
+
+ad_effect <- normed_scores %>% 
+  
+  dplyr::filter(chem_name %in% c(compound, "Water_1", "Water_2"),
+                promoter == promoter_name) %>% 
+  mutate(chem_name = factor(chem_name, levels = c(compound, "Water_1", "Water_2"))) %>% 
+  
+  ggplot(aes(x=genotype_rep, y=value, group=chem_conc, shape=chem_name, color=chem_name)) +
+  
+  geom_line(aes(linetype=chem_name)) +
+  geom_point() +
+  
+  scale_color_manual(values = c("red", "#C5C5C5", "#C5C5C5")) +
+  
+  
+  facet_wrap(~concentration, ncol = 2) +
+  
+  theme_light() +
+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  
+  labs(title = paste(compound, "effect on micF expression"),
+       x="Genotype",
+       y="Scores")
+
+
+ad_effect
+
+ggsave(filename = path_target(paste(compound, "scores_unnormed.png", sep = "_")), dpi=300, plot=ad_effect)
+```
+
+
+One thing we can do is consider the range of scores taken by water for each genotype_replicate 
+
+```{r}
+water_ranges <- normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2"),
+                promoter == promoter_name) %>% 
+  
+  group_by(genotype_rep) %>% 
+  
+  summarise(water_max = max(value),
+            water_min = min(value)) %>% 
+  
+  ungroup()
+
+water_range_p <- water_ranges %>% 
+  pivot_longer(cols = c(water_max, water_min), names_to = "water_range", values_to = "score") %>% 
+  
+  ggplot(aes(x=genotype_rep, y=score, group=water_range, color=water_range, shape=water_range)) +
+  
+  geom_line(aes(linetype=water_range)) +
+  geom_point() +
+  
+  scale_color_manual(values=c("red", "blue")) +
+  theme_light() +
+  
+  labs(title = paste(promoter_name, "maximum and minimum water scores"),
+       x="Genotype",
+       y="Scores")
+
+water_range_p
+ggsave(filename = path_target(paste(promoter_name, "water_range.png", sep = "_")), dpi=300, plot=water_range_p)
+
+  
+```
+
+
+
+
+```{r}
+wn_diagram <- water_ranges %>% 
+  dplyr::filter(genotype_rep %in% c("WT_1", "WT_2")) %>% 
+  
+  mutate(water_max=c(100, 100),
+    original_score = c(80, 150),
+         normed_score = c(0, 50),
+    water_min=c(-100, -100)) %>% 
+  
+  pivot_longer(cols=c(water_max, water_min, original_score, normed_score), names_to = "chem_name", values_to = "score") %>% 
+  mutate(chem_name = factor(chem_name, levels = c("water_max", "water_min", "original_score", "normed_score"))) %>% 
+  
+  ggplot(aes(x=genotype_rep, y=score, color = chem_name)) +
+    
+    geom_point(size=7) +
+    
+    scale_color_manual(values=c("#C5C5C5", "#C5C5C5", "red", alpha("red", 0.3))) +
+  
+  theme_classic() +
+  
+  theme(legend.position = "none") +
+  
+  geom_hline(yintercept = 0, linetype="dashed") +
+  
+  labs(y="Score",
+       x="")
+
+wn_diagram
+
+ggsave(filename = path_target("water_normalization_procedure.png"), dpi=300, plot=wn_diagram)
+
+  
+```
+
+
+### Complete Water thresholding
+
+```{r wthreshed.scores}
+
+complete.wranges <- normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2")) %>% 
+  
+  group_by(promoter, genotype_rep) %>% 
+  
+  summarise(water_max = max(value),
+            water_min = min(value)) %>% 
+  
+  ungroup() %>% 
+  
+  unite(promoter, genotype_rep, col = "promoter_genotype_rep")
+
+
+
+wthresh.scores <- normed_scores %>% 
+  unite(promoter, genotype_rep, col = "promoter_genotype_rep", remove = FALSE) %>% 
+  
+  left_join(complete.wranges, by="promoter_genotype_rep") %>% 
+  
+  # Normalise score values
+  mutate(value_normed = case_when(value <= water_max & value >= water_min ~ 0,
+                                  value > water_max ~ value - water_max,
+                                  value < water_min ~ value - water_min,
+                                  TRUE ~ value))
+```
+
+The effect on Adrenalin scores
+
+
+```{r adrenalin.wthresh}
+
+promoter_name <- "pmicF"
+compound <- "Adrenalin"
+
+
+df.water <- wthresh.scores %>%
+  
+  dplyr::filter(chem_name == compound,
+                promoter == promoter_name) %>% 
+  
+    select(genotype_rep, water_max, water_min) %>% 
+    pivot_longer(cols=c(water_max, water_min), names_to = "water_profile", values_to = "value")
+
+
+
+ad_effect <- wthresh.scores %>% 
+  
+  dplyr::filter(chem_name == compound,
+                promoter == promoter_name) %>% 
+  
+  ggplot(aes(x=genotype_rep, y=value_normed, group=chem_conc)) +
+  
+  geom_line(color="orange") +
+  geom_point(color="orange") +
+  
+  
+  facet_wrap(~concentration, ncol = 2) +
+  
+  geom_line(data=df.water, aes(x=genotype_rep, y=value, linetype=water_profile, group=water_profile), color="#C5C5C5") +
+
+  
+  theme_light() +
+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  
+  labs(title = paste(compound, "effect on micF expression"),
+       x="Genotype",
+       y="Scores")
+
+
+ad_effect
+
+ggsave(filename = path_target(paste(compound, "scores_wthreshold.png", sep = "_")), dpi=300, plot=ad_effect)
+
+```
+
+
+
+
+```{r adrenalin.example.micf}
+
+viz_scores <- function(promoter_name, chemical_name, score.df = wthresh.scores){
+  
+  # Gather the relevant information
+  df.relevant <- score.df %>% 
+    dplyr::filter(promoter == promoter_name, chem_name == chemical_name) %>% 
+   mutate(concentration = factor(concentration, levels = sort(unique(concentration))))
+  
+  
+  # Gather water ranges
+  df.water <- df.relevant %>% 
+    select(genotype_rep, water_max, water_min) %>% 
+    pivot_longer(cols=c(water_max, water_min), names_to = "water_profile", values_to = "value")
+  
+  
+  # Original scores
+  org.score.plot <- ggplot(df.relevant, aes(x=genotype_rep, y=value, color=concentration, group=chem_conc)) +
+    geom_line() +
+    geom_point() +
+  
+    theme_light() +
+  
+    geom_line(data=df.water, aes(x=genotype_rep, y=value, linetype=water_profile, group=water_profile), color="#C5C5C5") +
+    
+    labs(x="Genotype",
+         y="Score",
+         title = paste(promoter_name, "scores for", chemical_name),
+         subtitle = "Q-Normed scores")
+  
+  
+   # Thresholded scores
+  wthr.score.plot <- ggplot(df.relevant, aes(x=genotype_rep, y=value_normed, color=concentration, group=chem_conc)) +
+    geom_line() +
+    geom_point() +
+  
+    theme_light() +
+  
+    geom_line(data=df.water, aes(x=genotype_rep, y=value, linetype=water_profile, group=water_profile), color="#C5C5C5") +
+    
+    labs(x="Genotype",
+         y="Score (water thresholded)",
+         title = paste(promoter_name, "scores for", chemical_name),
+         subtitle = "Water thresholded scores")
+  
+  
+  return(list("org.score.plot" = org.score.plot, "water.score.plot" = wthr.score.plot))
+  
+}
+
+
+
+viz_scores("pmicF", "Adrenalin")
+```
+
+
+
+
+
+## Modeling strategy
+
+We come up with a strategy where we predict the expression of a given gene. The complete model is as follows:
+
+$$\mathbf{y}_{g,c} = \beta_0 + \sum_{j}^4 \beta_j X_j + \frac{1}{2} \sum_{j \neq k}^4 \Theta_{jk} X_j X_k + \epsilon \ ,$$
+
+In our setting:\
+$\mathbf{y}_{g,c}$ is a vector of CPI scores for a specific gene-compound combination. 
+
+$\beta_0$ is an intercept.
+
+$\beta_j$ refers to the effect that variable $j$ has on the obseved CPI. This can be compound concentration, or the presence of a regulator.
+
+$X_j$ is the value for variable $j$
+
+$\Theta_{jk}$ captures the interaction effect between all possible variables.
+
+$\epsilon$ models technical and biological noise. 
+
+
+The corresponding design matrix is constructed as $X = [X_{\text{conc}}, X_{\text{rob}},X_{\text{marA}}, X_{\text{soxS}}]$ . The concentration of the compound is a 
+discrete variable ($X_{\text{conc}} \in \{1,2,4,8\}$), and genetic background is represented as a binary variable indicating regulator presence/absence ($X_{\text{rob}}, X_{\text{marA}}, X_{\text{soxS}} \in \{0,1\}$). As mentioned before, all pairwise interactions between the variables in $X$ are included in our model.
+
+
+## Treatment predictors
+
+We now set up indicator variables to indicate the presence and absence of each regulator. A *1* indicates presence and a *0* indicates absence. 
+Given the experimental design that we have, the wildtype will have 1 across all regulators. There will not be a case were all regulators are 0.
+
+Also, we can start to build the interaction effects.
+
+```{r setup_design}
+scores_with_design <- normed_scores %>% 
+  
+  # Treatment effects
+  mutate(t_rob = if_else(genotype == "drob", 0, 1),
+         
+         t_mara = if_else(genotype == "dmarA", 0, 1),
+         
+         t_soxs = if_else(genotype == "dsoxS", 0, 1))
+```
+
+
+Below, is a function that will build the design matrix for us. One can choose the representation of concentration, and the model
+
+```{r gather_data}
+
+determine_design <- function(strat_str){
+  
+  if(strat_str == "scores_qnormed"){
+    
+    selected_vars <- c("value", "water_max", "water_min","concentration",  # Baseline
+           "t_rob", "t_mara", "t_soxs") # Treatments
+    
+  }else if(strat_str == "scores_water_normed"){
+    
+    selected_vars <- c("value_normed", "concentration", "t_rob", "t_mara", "t_soxs")
+    
+  }
+  
+  return(selected_vars)
+  
+}
+
+represent_concentration <- function(dataframe, strat_str){
+  
+  if(strat_str == "log_mock"){
+    
+    new_dataframe <- dataframe %>% 
+      mutate(concentration = 2 ^ (concentration - 1))
+    
+  }else if(strat_str == "real"){
+    if(any(is.na(dataframe$Conc))){
+      
+      print("Real Concentration not available. Returning neg_mock instead")
+      new_dataframe <- represent_concentration(dataframe, "log_mock")
+      
+    }else{
+      
+      new_dataframe <- dataframe %>% 
+        select(-concentration) %>% 
+        rename("concentration" = "Conc")
+    }
+    
+  }
+  
+  return(new_dataframe)
+  
+}
+  
+  
+
+build_features <- function(df, chemical_name, promoter_name, predictors="direct", concentration_rep="neg_mock", scale_value = TRUE){
+  # Build Features
+  # This function returns the design and response variables for a given, chemical-promoter combination.
+  # @param df DataFrame that contains all of the design and metainfo all response variables
+  # @param chemical_name the name of the chemical we are interested in
+  # @param promoter_name the name of the promoter we want a response to
+  # @param predictors whether to return only treatment predictors, interaction terms, or higher order interactions
+  # @param concentration_rep how to consider the concentration. can be "mock" for 1:4, "neg_mock" for the -(1:4) "rev_mock" so that 1 < 4, or "real" for the real concentration
+  
+  # @return a DataFrame with the appropriate response and design matrix
+  
+  
+  # Gather the range of values by the promoter when exposed to Water
+  promoter_water <- df %>% 
+    dplyr::filter(chem_name %in% c("Water_1", "Water_2") & promoter==promoter_name) %>% 
+    group_by(genotype_rep) %>% 
+    summarise(water_max = max(value), water_min = min(value)) %>% 
+    ungroup()
+  
+  # Gather the values for the promoter under the influence of the compound
+  promoter_data <- df %>% 
+    dplyr::filter(chem_name == chemical_name & promoter==promoter_name)
+  
+  # Join information about water range 
+  complete_df <-  promoter_data %>% 
+    left_join(promoter_water, by="genotype_rep") %>% 
+    
+    # Normalise score values
+    mutate(value_normed = case_when(value <= water_max & value >= water_min ~ 0,
+                                  value > water_max ~ value - water_max,
+                                  value < water_min ~ value - water_min,
+                                  TRUE ~ value))
+  
+  
+  # Represent concentration correctly
+  complete_df <- represent_concentration(complete_df, concentration_rep)
+  
+  # Select what terms should be returned
+  selected_vars <- determine_design(predictors)
+  
+  
+  # Prepare output
+  out.df <- complete_df %>%
+    # Select the relevant data
+    select(all_of(selected_vars))
+  
+  # Rename column if necessary
+  if(predictors == "scores_water_normed"){
+    
+    out.df <- out.df %>% 
+      rename("value" = "value_normed")
+    
+  }
+  
+  
+  if(scale_value == TRUE){
+    out.df <- out.df %>% 
+      mutate(value = scale(value),
+             value = if_else(is.na(value), 0, value))
+  }
+  
+  return(out.df)}
+
+```
+
+
+## Interaction Model.
+
+
+```{r hiernet_function, message=FALSE}
+library(hierNet)
+
+
+interaction_viz <- function(fit_obj, original_design){
+  
+  # Interaction matrix
+  imat <- fit_obj$th
+
+  # Identifying coefficients
+  colnames(imat) <- row.names(imat) <- colnames(as.matrix(original_design[, 2:ncol(original_design)]))
+
+  # Main effects
+  main_effects <- fit_obj$bp - fit_obj$bn
+  names(main_effects) <- colnames(as.matrix(original_design[, 2:ncol(original_design)]))
+
+  # Replace main effects on diagonal of imat (easier viz)
+  for(v in names(main_effects)){
+    imat[v, v] = main_effects[v]
+    }
+
+
+interact_viz <- as.data.frame(imat) %>% 
+  rownames_to_column("c1") %>% 
+  
+  pivot_longer(cols = names(main_effects),
+               names_to = "c2",
+               values_to = "coef_value") %>% 
+  
+  ggplot(aes(x=c1, y=c2, fill=coef_value)) +
+  geom_tile(color = "black",
+            lwd = 1,
+            linetype = 1) +
+  scale_fill_gradient2(low = "#4393c3",
+                       mid = "#f7f7f7",
+                       high = "#d6604d",
+                       midpoint = 0) +
+  geom_text(aes(label = round(coef_value, 3)), color = "black", size = 4) +
+  theme_minimal() +
+
+  labs(x="",
+       y="",
+       title = "Interaction Effect Coefficients - Strong Hierarchy",
+       subtitle = "Main Effects on diagonal")
+
+return(interact_viz)
+  
+}
+
+lampath.viz <- function(path_df){
+  
+  err.cv <- ggplot(path_df, aes(x = log2(lambda), y=cv.error)) +
+  geom_line() +
+  geom_point() +
+  geom_vline(aes(xintercept = log2(unique(lam.min)), color="lambda.min"), linetype="dashed", size=1) +
+  geom_vline(aes(xintercept = log2(unique(lam.1se)), color="lambda.1se"), linetype="dashed", size=1) +
+  geom_ribbon(aes(x=log2(lambda), ymax=cv.error + cv.stderr, ymin=cv.error - cv.stderr, fill="std.error"),
+              alpha=0.15) + 
+  scale_color_manual(name = "Lambda values of interest", values = c(lambda.1se = "#377eb8", lambda.min = "red")) +
+  scale_fill_manual(name = "CV.Error +/- Std.Error", values=c(std.error = "black")) +
+                       
+  theme_bw() +
+  ggtitle("Cross Validation error across lambda path")
+
+ nonZ.cv <- ggplot(path_df, aes(x = log2(lambda), y=n.non.zero)) +
+  geom_vline(aes(xintercept = log2(unique(lam.min)), color="lambda.min"), linetype="dashed", size=1) +
+  geom_vline(aes(xintercept = log2(unique(lam.1se)), color="lambda.1se"), linetype="dashed", size=1) +
+  geom_line() +
+  geom_point() +
+  scale_color_manual(name = "Lambda values of interest", values = c(lambda.1se = "#377eb8", lambda.min = "red")) +
+  theme_bw() +
+  ggtitle("Non-zero coefficients across lambda path") +
+  ylab("N non-zero coefficients")
+ 
+ 
+ return(list("error.cv" = err.cv, "non_zero.cv" = nonZ.cv))
+  
+  
+}
+
+chemical_hiernet <- function(promoter_name, chemical_name, concentration_rep="real", counter=0, lambdamax=NULL, score_df=scores_with_design){
+  
+  
+  # Build design Matrix
+  X <- build_features(score_df, chemical_name, promoter_name, concentration_rep = concentration_rep, predictors = "scores_water_normed")
+  
+  # Apply HierNet
+  set.seed(42)
+  path_fits <- hierNet.path(y=X$value[,1], x=as.matrix(X[, 2:ncol(X)]), diagonal = FALSE, maxlam = lambdamax, strong = TRUE)
+  
+  hiernetcv <- hierNet.cv(fit = path_fits,
+           y=X$value[,1], 
+           x=as.matrix(X[, 2:ncol(X)]),
+           nfolds = 4)
+  
+  # If minimum lambda is just the smallest lambda tested and the counter is below 3, repeat the fitting procces with a new lambda
+  if(hiernetcv$lamhat == min(hiernetcv$lamlist) & counter <= 5){
+    chemical_hiernet(promoter_name, chemical_name, concentration_rep, counter + 1, hiernetcv$lamhat.1se, score_df)
+  }
+  
+  # If the fit was correct, gather data
+  hcv_df <- data.frame(lambda=hiernetcv$lamlist,
+                     n.non.zero=hiernetcv$nonzero,
+                     cv.error = hiernetcv$cv.err,
+                     cv.stderr = hiernetcv$cv.se,
+                     lam.1se = hiernetcv$lamhat.1se,
+                     lam.min = hiernetcv$lamhat)
+
+  
+  # Final fit with optimal lambda
+  final.fit.strong <- hierNet(y=X$value[,1], 
+           x=as.matrix(X[, 2:ncol(X)]),
+        lam = hcv_df$lam.1se,
+        strong = TRUE,
+        diagonal = FALSE)
+  
+  # Prepare Viz
+  plot.list <- lampath.viz(hcv_df)
+  plot.list[["interaction_mat"]] <- interaction_viz(final.fit.strong, X)
+  
+  
+  return(plot.list)
+  }
+
+
+```
+
+
+```{r hiernet_test, include=FALSE, out.width='100%'}
+hcv_micf_paraquat <- chemical_hiernet("pmicF", "Paraquat")
+```
+
+
+```{r}
+hcv_micf_paraquat
+```
+
+
+
+```{r, include=FALSE}
+ggsave(plot=hcv_micf_paraquat$interaction_mat, filename = path_target("hiernet_micf_paraquat.png"), dpi = 300)
+```
+
+
+```{r}
+viz_scores("pmicF", "Caffeine")
+```
+
+
+```{r, include=FALSE, message=FALSE}
+hcv_micf_caffeine <- chemical_hiernet("pmicF", "Caffeine")
+ggsave(plot=hcv_micf_caffeine$interaction_mat, filename = path_target("hiernet_micf_caffeine.png"), dpi = 300)
+```
+
+```{r}
+hcv_micf_caffeine$interaction_mat
+```
+
+
+
+  
+The diagonal shows us what we saw with the simple LASSO model: negative coefficients for marA, and rob, as well as positive coefficients for soxS and the concentration.   
+  
+Additionally, we see a negative coefficient for the interaction between rob and marA, albeit a small one. I wonder what the effect of Stability Selection would be.
+
+
+
+
+### Examining MicF expression in response to Salicylate
+
+We also have an expected result from the response of micF to Salicylate. Let's see if we can uncover it with our model.
+
+```{r micf.salicylate}
+viz_scores("pmicF", "Salicylate")
+```
+
+Build the design matrix
+
+```{r saly_micf, include=FALSE, message=FALSE}
+hnet.micf.salicylate <- chemical_hiernet("pmicF", "Salicylate")
+```
+
+```{r}
+hnet.micf.salicylate
+```
+
+  
+Looks to me like these results are correct. Just for fun, what would we detect with stability selection.  
+
+  
+We are missing the effect of marA, which is actually quite important in this case.
+
+### Examining marAB expression in response to Salicylate
+
+Up until now, we have been predicting the response of micF, for which we know a lot. How about for another gene, such as marRAB (which actually is an operon that includes marA).
+
+```{r marrab.salicylate}
+viz_scores("pmarRAB", "Salicylate")
+```
+
+Seems like we only observe a response at high doses, though it doesn't really seem to depend on the genotype.
+
+We build our design matrix
+
+```{r saly_mara, include=FALSE, message=FALSE}
+hnet.marrab.salicylate <- chemical_hiernet("pmarRAB", "Salicylate")
+```
+
+```{r}
+hnet.marrab.salicylate
+```
+
+
+## All promoter - compound combinations
+
+
+Now we run the model for all promoter-compound combinations. To start simple, I will only consider the direct interactions
+
+```{r combo_function}
+
+final_fit <- function(X, cvobj){
+  
+  # Perform the final fit
+  final.fit.strong <- hierNet(y=X$value[, 1], 
+                              x=as.matrix(X[, 2:ncol(X)]),
+                              lam = cvobj$lamhat.1se, 
+                              strong = TRUE,
+                              diagonal = FALSE)
+  
+  # Gather MSE
+  fit.predictions <- predict(final.fit.strong, as.matrix(X[, 2:ncol(X)]))
+  sq.error <- (X$value - fit.predictions)**2
+  mse.prediction <- sum(sq.error) / length(X$value)
+  
+  # Gather interaction matrix
+  imat <- final.fit.strong$th
+  
+  # Interaction effects
+  colnames(imat) <- row.names(imat) <- colnames(as.matrix(X[, 2:ncol(X)]))
+  
+  # Main effects
+  main_effects <- final.fit.strong$bp - final.fit.strong$bn
+  names(main_effects) <- colnames(as.matrix(X[, 2:ncol(X)]))
+
+  # Replace for viz
+  for(v in names(main_effects)){
+  imat[v, v] = main_effects[v]
+  }
+  
+  # Set lower triangle to NA
+  imat[lower.tri(imat)] <- NA
+  
+  
+  # Format output into dataframe
+  estim_coefs <- as.data.frame(imat) %>% 
+    rownames_to_column("c1") %>% 
+    
+    # Pivot to longform
+    pivot_longer(cols = colnames(as.matrix(X[, 2:ncol(X)])),
+               names_to = "c2",
+               values_to = "coef_value") %>% 
+    
+    # Create meaningful coefficient names
+    mutate(coef_name = if_else(c1 == c2, c1, paste(c1, c2, sep=":")),
+           objective.f.value = final.fit.strong$obj,
+           mse.value = mse.prediction) %>% 
+    
+    # Filter repeated interactions
+    dplyr::filter(!is.na(coef_value))
+  
+  # Return the output
+  return(estim_coefs)
+}
+
+
+fit.cv <- function(dmat, counter=0, maximum_lambda=NULL){
+  
+  # Perform HierNet
+  
+  ## Fit path
+  set.seed(42)
+  path_fits <- hierNet.path(y=dmat$value[, 1], x=as.matrix(dmat[, 2:ncol(dmat)]), maxlam = maximum_lambda, diagonal = FALSE)
+  
+  ## Cross-validation
+  hiernetcv <- hierNet.cv(fit = path_fits,
+           y=dmat$value[, 1], 
+           x=as.matrix(dmat[, 2:ncol(dmat)]),
+           nfolds = 4)
+  
+  # Check if the minimum lambda is simply the smallest lambda tested (usually is the case)
+  min_tested_is_lambdahat = min(hiernetcv$lamlist) == hiernetcv$lamhat
+  
+  # Re-do fit with adjusted lambda range
+  if(min_tested_is_lambdahat & counter < 5){
+    
+    fit.cv(dmat, counter = counter + 1, maximum_lambda=hiernetcv$lamhat.1se)
+    
+  }
+  
+  # Gather CV error information
+  hcv_df <- data.frame(lambda=hiernetcv$lamlist,
+                     n.non.zero=hiernetcv$nonzero,
+                     cv.error = hiernetcv$cv.err,
+                     cv.stderr = hiernetcv$cv.se,
+                     lam.1se = hiernetcv$lamhat.1se,
+                     lam.min = hiernetcv$lamhat)
+  
+  # Error from 1se
+  se1.cv.error <- hcv_df %>% 
+    filter(lambda == lam.1se) %>% 
+    select(cv.error) %>% 
+    unlist()
+  
+  se1.cv.std <- hcv_df %>% 
+    filter(lambda == lam.1se) %>% 
+    select(cv.stderr) %>% 
+    unlist()
+  
+  
+  # Perform final fit  
+  estimated_coefficients <- final_fit(dmat, hiernetcv)
+  
+  # Add information about the lambda selected
+  estimated_coefficients <- estimated_coefficients %>% 
+    mutate("lambda.min_is_smallest.lambda" = min_tested_is_lambdahat,
+           "cv.error.1se" = se1.cv.error,
+           "cv.stderr.1se" = se1.cv.std)
+  
+  
+  
+  return(estimated_coefficients)
+
+  
+}
+
+colchecks <- function(X){
+  
+  # Make sure that there is more than one unique value in the "value" column.
+  
+  if(X %>% select(value) %>% n_distinct() == 1){
+    
+    return("no unique values")
+    
+  }
+  
+  
+  
+  # How many concentrations are tested
+  nconc <- X %>% 
+    select(concentration) %>% 
+    n_distinct()
+  
+  # If only one, then remove concentration column
+  if(nconc == 1){
+    
+    X <- X %>% 
+      select(-concentration)
+    
+  }
+  
+  return(X)
+  
+}
+
+hiernet_features <- function(gene_compound, score_df=scores_with_design, concentration_representation="real", predictor_matrix = "scores_water_normed"){
+  
+  # Get the gene and the compound
+  sep_list <- str_split(gene_compound, ":")[[1]]
+  gene <- sep_list[1]
+  compound <- sep_list[2]
+  
+  # Get the corresponding design matrix
+  design_df <- build_features(score_df, compound, gene, concentration_rep = concentration_representation, predictors = predictor_matrix)
+  num_observations <- nrow(design_df)
+  
+  # Check for concentration
+  # Some experiments only have one concentration, HierNet breaks in these cases so we need to remove it.
+  design_df <- colchecks(design_df)
+  
+  
+  # Return empty dataframe if there are no unique values in the response columns
+  if(is.character(design_df)){
+    
+    if(design_df == "no unique values"){
+      
+      # Standard Output
+      hnet.results <- data.frame("c1" = c("t_rob", "t_rob", "t_rob", "t_mara", "t_mara", "t_soxs"),
+                               "c2" = c("t_rob", "t_mara", "t_soxs", "t_mara", "t_soxs", "t_soxs"),
+                               "coef_value" = 0,
+                               "coef_name" = c("t_rob", "t_rob:t_mara", "t_rob:t_soxs", "t_mara", "t_mara:t_soxs", "t_soxs"),
+                               "lambda.min_is_smallest.lambda" = FALSE,
+                               "promoter" = gene,
+                               "chem_name" = compound,
+                               "n_obs" = 0,
+                               "original_cvalue" = 0,
+                               "objective.f.value"=NA,
+                               "mse.value" = NA,
+                               "cv.error.1se" = NA,
+                               "cv.stderr.1se" = NA)
+
+    
+      return(hnet.results)
+      
+    }
+  }
+  
+  
+  # Do the hierNet
+  tryCatch({
+    
+    hnet.results <- fit.cv(design_df)
+    # Add experiment information
+  hnet.results <- hnet.results %>% 
+    mutate(promoter=gene,
+           chem_name=compound,
+           n_obs = num_observations,
+           
+           original_cvalue = coef_value,
+           coef_value = if_else(abs(coef_value) > 0.01, coef_value, 0)
+           )
+  
+
+   return(hnet.results)
+    
+  },
+  error=function(e) {
+            message(paste("Error for", gene_compound))
+            print(e)
+        })
+}
+```
+
+Perform HierNet
+
+
+```{r}
+chem_promoter_combos <- scores_with_design %>% 
+  dplyr::filter(!chem_name %in% c("Water_1", "Water_2"),
+                promoter != "EVC") %>% 
+  
+  select(chem_name, promoter) %>% 
+  distinct() %>% 
+  mutate(exp_combo = paste(promoter, chem_name, sep = ":")) %>% 
+  select(exp_combo) %>% 
+  unlist()
+
+length(chem_promoter_combos)
+```
+
+
+
+
+```{r combo_regression, warning=FALSE, message=FALSE}
+library(foreach)
+
+doParallel::registerDoParallel(cores=4)
+system.time(regression_result <- foreach(pchem = chem_promoter_combos, .combine = "rbind") %dopar% hiernet_features(pchem))
+```
+
+
+
+Considering that in total 760 tests were done, we can see that the grand majority of coefficients that we are interested in have a value of 0. We can take a look at the distribution.  
+  
+```{r direction_distrib, out.width='100%'}
+g <- regression_result %>% 
+  
+  dplyr::filter(coef_name %in% c("concentration", "t_rob", "t_mara", "t_soxs", "t_rob:t_mara", "t_rob:t_soxs", "t_mara:t_soxs")) %>% 
+  
+  mutate(effect = case_when(coef_value < 0 ~ "negative",
+                            coef_value > 0 ~ "positive",
+                            TRUE ~ "no_effect")) %>% 
+  group_by(coef_name) %>% 
+  dplyr::count(effect) %>% 
+  dplyr::filter(effect != "no_effect") %>% 
+  
+  mutate(coef_name = factor(coef_name, levels=c("concentration", "t_rob", "t_mara", "t_soxs", "t_rob:t_mara", "t_rob:t_soxs", "t_mara:t_soxs"))) %>% 
+  
+  ggplot(aes(x=coef_name, y = n, fill=effect)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "Coefficient effect on expression",
+       x= "Coefficient Name",
+       y="N",
+       fill="Effect")
+g
+
+ggsave(plot=g, filename = path_target("coefficient_effect.png"), dpi = 300)
+```
+
+
+  
+
+```{r coef_by_gene, out.width='100%'}
+g <- regression_result %>% 
+  
+  dplyr::filter(coef_name %in% c("concentration", "t_rob", "t_mara", "t_soxs", "t_rob:t_mara", "t_rob:t_soxs", "t_mara:t_soxs")) %>% 
+  
+  mutate(effect = case_when(coef_value < 0 ~ "negative",
+                            coef_value > 0 ~ "positive",
+                            TRUE ~ "no_effect")) %>% 
+  group_by(coef_name, promoter) %>% 
+  dplyr::count(effect) %>% 
+  dplyr::filter(effect != "no_effect") %>% 
+  
+  mutate(coef_name = factor(coef_name, levels=c("concentration", "t_rob", "t_mara", "t_soxs", "t_rob:t_mara", "t_rob:t_soxs", "t_mara:t_soxs"))) %>% 
+  
+  ggplot(aes(y=effect, x=n, fill=effect)) +
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  facet_grid(promoter~coef_name) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        legend.position = "none") +
+  labs(title = "Coefficient effect on expression",
+       y= "Coefficient effect",
+       x="N")
+
+g
+
+ggsave(plot=g, filename=path_target("coeff_effect_promoter.png"), dpi=300,
+       width = 7.5, height = 5.8)
+```
+
+```{r}
+n_reg_involved.p <- regression_result %>% 
+  dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs")) %>% 
+  
+  group_by(promoter, chem_name) %>% 
+  summarise(n_promoters = sum(coef_value != 0)) %>% 
+  ungroup() %>% 
+  
+  dplyr::filter(n_promoters > 0) %>% 
+  count(n_promoters) %>% 
+  
+  mutate(n_promoters = factor(n_promoters, levels = c(1, 2, 3))) %>% 
+  
+  
+  ggplot(aes(x=n_promoters, y=n, fill=n_promoters)) +
+  geom_bar(stat="identity", color="black", position=position_dodge()) +
+  theme_light() +
+  
+  scale_fill_manual(values=c("#D83109", "#0B6288", "#069B42")) +
+  
+  geom_text(aes(label=n), vjust=1.6, color="white", size=3.5) +
+  theme(legend.position="none") +
+  labs(x="Number of regulators affecting gene expression",
+       y="Number of promoter-compound pairs")
+  
+  
+  
+n_reg_involved.p
+ggsave(plot=n_reg_involved.p, filename = path_target("n_promoters_invoved.png"), dpi=300)
+```
+    
+    
+We can also view this per gene
+
+```{r}
+n_reg_genewise.p <- regression_result %>% 
+  dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs")) %>% 
+  
+  group_by(promoter, chem_name) %>% 
+  summarise(n_promoters = sum(coef_value != 0)) %>% 
+  
+  dplyr::filter(n_promoters > 0) %>% 
+  count(n_promoters) %>% 
+  ungroup() %>% 
+  
+  mutate(n_promoters = factor(n_promoters, levels = c(1, 2, 3))) %>% 
+  
+  ggplot(aes(x=n_promoters, y=n, fill=n_promoters)) +
+  geom_bar(stat="identity", color="black", position=position_dodge()) +
+  theme_light() +
+  facet_wrap(~promoter, ncol = 4) +
+  
+  scale_fill_manual(values=c("#D83109", "#0B6288", "#069B42")) +
+  
+  ylim(0, 24) +
+  
+  geom_text(aes(label=n), vjust=-0.3, color="black", size=3.5) +
+  theme(legend.position="none") +
+  labs(x="Number of regulators affecting gene expression",
+       y="Number of promoter-compound pairs") 
+
+n_reg_genewise.p
+
+
+ggsave(plot=n_reg_genewise.p, filename = path_target("n_promoters_invoved_perGene.png"), dpi=300)
+```
+
+```{r}
+nreg_direction.p <- regression_result %>% 
+  dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs")) %>% 
+  
+  group_by(promoter, chem_name) %>% 
+  summarise(n_promoters_positive = sum(coef_value > 0), 
+            n_promoters_negative = sum(coef_value < 0), 
+            n_promoters = sum(coef_value != 0)) %>% 
+  ungroup() %>% 
+  dplyr::filter(n_promoters > 0) %>% 
+  
+  mutate(reg_combo = case_when(n_promoters_positive > 0 & n_promoters_negative > 0 ~ "mixed",
+                               n_promoters_positive > 0 & n_promoters_negative == 0 ~ "only_upregulate",
+                               n_promoters_positive == 0 & n_promoters_negative > 0 ~ "only_downregulate")) %>% 
+  
+  group_by(n_promoters) %>% 
+  count(reg_combo) %>% 
+  ungroup() %>% 
+  
+  mutate(reg_combo = factor(reg_combo, levels=c("only_upregulate", "only_downregulate", "mixed"))) %>% 
+  
+  ggplot(aes(x=n_promoters, y=n, fill=reg_combo)) +
+  geom_bar(stat="identity", color="black", position=position_dodge()) +
+  theme_light() +
+  
+  scale_fill_manual(values=c("#D83109", "#0B6288", "#069B42"), 
+                    labels=c("Up-regulate", "Down-regulate", "Mixed")) +
+  
+  geom_text(aes(label=n), vjust=1.6, color="white",
+            position = position_dodge(0.9), size=3.5) +
+  
+  theme(legend.position="right") +
+  labs(x="Number of regulators affecting gene expression",
+       y="Number of promoter-compound pairs",
+       fill="Regulatory Influence") 
+
+
+nreg_direction.p 
+ggsave(plot=nreg_direction.p, filename = path_target("n_promoters_invoved_direction.png"), dpi=300)
+```
+
+```{r}
+nreg_direction_genewise.p <- regression_result %>% 
+  dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs")) %>% 
+  
+  group_by(promoter, chem_name) %>% 
+  summarise(n_promoters_positive = sum(coef_value > 0), 
+            n_promoters_negative = sum(coef_value < 0), 
+            n_promoters = sum(coef_value != 0)) %>% 
+  ungroup() %>% 
+  dplyr::filter(n_promoters > 0) %>% 
+  
+  mutate(reg_combo = case_when(n_promoters_positive > 0 & n_promoters_negative > 0 ~ "mixed",
+                               n_promoters_positive > 0 & n_promoters_negative == 0 ~ "only_upregulate",
+                               n_promoters_positive == 0 & n_promoters_negative > 0 ~ "only_downregulate")) %>% 
+  
+  group_by(promoter, n_promoters) %>% 
+  count(reg_combo) %>% 
+  ungroup() %>% 
+  
+  mutate(reg_combo = factor(reg_combo, levels=c("only_upregulate", "only_downregulate", "mixed"))) %>% 
+  
+  ggplot(aes(x=n_promoters, y=n, fill=reg_combo)) +
+  geom_bar(stat="identity", color="black", position=position_dodge()) +
+  theme_light() +
+  
+  scale_fill_manual(values=c("#D83109", "#0B6288", "#069B42"), 
+                    labels=c("Up-regulate", "Down-regulate", "Mixed")) +
+  
+  geom_text(aes(label=n), vjust=-0.3, color="black",
+            position = position_dodge(0.9), size=3.5) +
+  
+  facet_wrap(~promoter, ncol=4) +
+  ylim(0,19) +
+  
+  theme(legend.position="bottom") +
+  labs(x="Number of regulators affecting gene expression",
+       y="Number of promoter-compound pairs",
+       fill="Regulatory Influence") 
+
+nreg_direction_genewise.p
+ggsave(plot=nreg_direction_genewise.p, filename = path_target("n_promoters_invoved_direction_perGene.png"), dpi=300)
+```
+   
+
+
+
+```{r}
+regression_result %>% 
+  dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs")) %>% 
+  
+  group_by(promoter, chem_name) %>% 
+  summarise(n_promoters = sum(coef_value > 0)) %>% 
+  
+  dplyr::filter(n_promoters > 0) %>% 
+  count(n_promoters) %>% 
+  ungroup() %>% 
+  mutate(n_promoters = factor(n_promoters, levels = c(1, 2, 3))) %>% 
+  
+  
+  ggplot(aes(x=n_promoters, y=n, fill=n_promoters)) +
+  geom_bar(stat="identity", color="black", position=position_dodge()) +
+  theme_light() +
+  facet_wrap(~promoter, ncol = 4) +
+  
+  scale_fill_manual(values=c("#D83109", "#0B6288", "#069B42")) +
+  
+  geom_text(aes(label=n), vjust=-0.3, color="black", size=3.5) +
+  theme(legend.position="none") +
+  labs(x="Number of regulators up-regulating gene expression",
+       y="Number of promoter-compound pairs")
+```
+
+  
+
+
+
+
+# Specific examples
+
+## pmicF - Salicylate
+
+
+
+```{r}
+viz_scores("pmicF", "Salicylate")
+```
+
+
+```{r}
+coef.val.spec <- regression_result %>% 
+  dplyr::filter(promoter == "pmicF", chem_name == "Salicylate", coef_name %in% c("t_rob", "t_mara", "t_soxs")) %>% 
+  mutate(coef_name = case_when(coef_name == "t_mara" ~ "marA",
+                               coef_name == "t_rob" ~ "rob",
+                               coef_name == "t_soxs" ~ "soxS")) %>% 
+  
+  ggplot(aes(x=coef_name, y=coef_value)) +
+  
+  geom_hline(yintercept = 0, linetype = "longdash", color="black") +
+  
+  
+  geom_point(aes(color=coef_name), size=4) +
+  geom_point(shape = 21, colour = "black", size=4) +
+  
+  
+  scale_color_manual(values = c("#D83109", "#0B6288", "#069B42")) +
+  
+  
+  theme_light() +
+  theme(legend.position = "none") +
+  
+  labs(x="Promoter Coefficient",
+       y="Coefficient Value")
+
+coef.val.spec
+```
+
+
+```{r}
+score.fc.conc <- wthresh.scores %>% 
+  dplyr::filter(promoter == "pmicF", chem_name == "Salicylate") %>% 
+  
+  group_by(genotype, Conc) %>% 
+  summarise(avg_score = mean(value_normed)) %>% 
+  ungroup() %>% 
+  
+  pivot_wider(id_cols = Conc, names_from = genotype, values_from = avg_score) %>% 
+  
+  column_to_rownames("Conc") %>% 
+  
+  mutate_at(vars(-WT), list(fc_wrt_wt=~./WT)) %>% 
+  
+  rownames_to_column("Conc") %>% 
+  select(-c(dmarA, drob, dsoxS, WT)) %>% 
+  
+  pivot_longer(cols = c(dmarA_fc_wrt_wt, drob_fc_wrt_wt, dsoxS_fc_wrt_wt), names_to = "prom_fc", values_to = "fc") %>% 
+  
+  separate(prom_fc, into = c("promoter", NA, NA, NA)) %>% 
+  
+  mutate(Conc = as.numeric(Conc),
+         Conc = factor(Conc, levels = sort(unique(Conc)))) %>% 
+  
+  
+  
+  
+  
+  ggplot(aes(x=promoter, y=fc, group=Conc)) +
+  
+  geom_hline(yintercept = 1, linetype = "longdash", color="black") +
+  geom_line() +
+  
+  geom_point(aes(color=Conc), size=4) +
+  geom_point(shape = 21, colour = "black", size=4) +
+  
+  scale_color_manual(values = c("#feebe2", "#fbb4b9", "#f768a1", "#ae017e")) +
+  
+  scale_x_discrete(labels=c("dmarA" = latex2exp::TeX("$\\Delta$marA"),
+                            "drob" = latex2exp::TeX("$\\Delta$rob"),
+                            "dsoxS" = latex2exp::TeX("$\\Delta$soxS"))) +
+  
+  theme_light() +
+  
+  labs(x = "Genotype",
+       y = "Score Fold-Change",
+       color="Concentration")
+
+score.fc.conc 
+```
+
+
+```{r}
+score.fc.singleconc <- wthresh.scores %>% 
+  dplyr::filter(promoter == "pmicF", chem_name == "Salicylate") %>% 
+  
+  group_by(genotype, Conc) %>% 
+  summarise(avg_score = mean(value_normed)) %>% 
+  ungroup() %>% 
+  
+  pivot_wider(id_cols = Conc, names_from = genotype, values_from = avg_score) %>% 
+  
+  column_to_rownames("Conc") %>% 
+  
+  mutate_at(vars(-WT), list(fc_wrt_wt=~./WT)) %>% 
+  
+  rownames_to_column("Conc") %>% 
+  select(-c(dmarA, drob, dsoxS, WT)) %>% 
+  
+  pivot_longer(cols = c(dmarA_fc_wrt_wt, drob_fc_wrt_wt, dsoxS_fc_wrt_wt), names_to = "prom_fc", values_to = "fc") %>% 
+  
+  separate(prom_fc, into = c("promoter", NA, NA, NA)) %>% 
+  dplyr::filter(Conc %in% c("138.1")) %>% 
+  
+  
+  
+  ggplot(aes(x=promoter, y=fc, group=Conc)) +
+ 
+  geom_hline(yintercept = 1, linetype = "longdash", color="black") +
+  geom_line() +
+  
+  geom_point(aes(color=promoter), size=4) +
+  geom_point(shape = 21, colour = "black", size=4) +
+  
+  
+  scale_color_manual(values = c("#D83109", "#0B6288", "#069B42")) +
+  
+  scale_x_discrete(labels=c("dmarA" = latex2exp::TeX("$\\Delta$marA"),
+                            "drob" = latex2exp::TeX("$\\Delta$rob"),
+                            "dsoxS" = latex2exp::TeX("$\\Delta$soxS"))) +
+
+  
+  theme_light() +
+  theme(legend.position = "none") +
+  
+  labs(x = "Genotype",
+       y = "Score Fold-Change")
+
+score.fc.singleconc
+```
+
+
+```{r}
+library(ggpubr)
+```
+
+
+
+
+```{r}
+micf.sal.grid <- ggarrange(coef.val.spec, get_legend(score.fc.conc) + theme_void(),
+          score.fc.conc + theme(legend.position = "none"), get_legend(score.fc.conc),
+          ncol=2, nrow = 2,
+          widths = c(2, 0.4))
+
+micf.sal.grid <- annotate_figure(micf.sal.grid,
+                top = text_grob("Salicylate - micF", hjust=1, x=0.55, size=14))
+
+micf.sal.grid
+ggsave(plot=micf.sal.grid, filename = path_target("salicylate_micf_concentrations.png"), dpi = 300)
+```
+
+```{r}
+ micf.sal.grid.sc <- ggarrange(coef.val.spec,
+          score.fc.singleconc,
+          ncol=1, nrow = 2)
+
+micf.sal.grid.sc <- annotate_figure(micf.sal.grid.sc,
+                top = text_grob("Salicylate - micF",size=14))
+
+micf.sal.grid.sc
+
+ggsave(plot=micf.sal.grid.sc, filename = path_target("salicylate_micf_oneconc.png"), dpi = 300)
+```
+
+## Paraquat - micF
+  
+```{r}
+coef.val.spec <- regression_result %>% 
+  dplyr::filter(promoter == "pmicF", chem_name == "Paraquat", coef_name %in% c("t_rob", "t_mara", "t_soxs")) %>% 
+  mutate(coef_name = case_when(coef_name == "t_mara" ~ "marA",
+                               coef_name == "t_rob" ~ "rob",
+                               coef_name == "t_soxs" ~ "soxS")) %>% 
+  
+  ggplot(aes(x=coef_name, y=coef_value)) +
+  
+  geom_hline(yintercept = 0, linetype = "longdash", color="black") +
+  
+  
+  geom_point(aes(color=coef_name), size=4) +
+  geom_point(shape = 21, colour = "black", size=4) +
+  
+  
+  scale_color_manual(values = c("#D83109", "#0B6288", "#069B42")) +
+  
+  
+  theme_light() +
+  theme(legend.position = "none") +
+  
+  labs(x="Promoter Coefficient",
+       y="Coefficient Value")
+
+coef.val.spec
+```
+
+```{r}
+wthresh.scores %>% 
+  dplyr::filter(promoter == "pmicF", chem_name == "Paraquat") %>% 
+  group_by(genotype, Conc) %>% 
+  summarise(avg_score = mean(value_normed)) %>% 
+  ungroup() %>% 
+  
+  pivot_wider(id_cols = Conc, names_from = genotype, values_from = avg_score) %>% 
+  
+    column_to_rownames("Conc") %>% 
+  
+  mutate_at(vars(-WT), list(fc_wrt_wt=~./WT))
+```
+
+
+
+```{r}
+wthresh.scores %>% 
+  dplyr::filter(promoter == "pmicF", chem_name == "Paraquat") %>% 
+  
+  group_by(genotype, Conc) %>% 
+  summarise(avg_score = mean(value_normed)) %>% 
+  ungroup() %>% 
+  
+  pivot_wider(id_cols = Conc, names_from = genotype, values_from = avg_score) %>% 
+  
+  column_to_rownames("Conc") %>% 
+  
+  mutate_at(vars(-WT), list(fc_wrt_wt=~./WT)) %>% 
+  
+  rownames_to_column("Conc") %>% 
+  select(-c(dmarA, drob, dsoxS, WT)) %>% 
+  
+  pivot_longer(cols = c(dmarA_fc_wrt_wt, drob_fc_wrt_wt, dsoxS_fc_wrt_wt), names_to = "prom_fc", values_to = "fc") %>% 
+  
+  separate(prom_fc, into = c("promoter", NA, NA, NA)) %>% 
+
+  mutate(Conc = as.numeric(Conc),
+         Conc = factor(Conc, levels = sort(unique(Conc)))) %>% 
+  
+  
+  
+  
+  
+  ggplot(aes(x=promoter, y=fc, group=Conc)) +
+  
+  geom_hline(yintercept = 1, linetype = "longdash", color="black") +
+  geom_line() +
+  
+  geom_point(aes(color=Conc), size=4) +
+  geom_point(shape = 21, colour = "black", size=4) +
+  
+  scale_color_manual(values = c("#fbb4b9", "#f768a1", "#ae017e")) +
+  
+  scale_x_discrete(labels=c("dmarA" = latex2exp::TeX("$\\Delta$marA"),
+                            "drob" = latex2exp::TeX("$\\Delta$rob"),
+                            "dsoxS" = latex2exp::TeX("$\\Delta$soxS"))) +
+  
+  theme_light() +
+  
+  labs(x = "Genotype",
+       y = "Score Fold-Change",
+       color="Concentration")
+```
+
+
+
+
+```{r}
+viz_scores("pmicF", "Paraquat")
+```
+
+
+
+
+
+
+```{r}
+significant_coefficients <- regression_result %>% 
+  
+  dplyr::filter(abs(coef_value) > 0.01) %>% 
+  
+  mutate(coef_name = case_when(coef_name == "concentration" ~ "Concentration",
+                               coef_name == "t_rob" ~ "rob",
+                               coef_name == "t_mara" ~ "marA",
+                               coef_name == "t_soxs" ~ "soxS",
+                               TRUE ~ coef_name),
+         
+         label_name = paste(coef_name, chem_name, sep = " - "),
+         label_name = case_when(promoter == "pmicF" & 
+                                  chem_name %in% c("Azithromycin", "Clarithromycin", "Eritromycin", 
+                                                                       "Tetracycline", "Caffeine", "Salicylate", "Paraquat") &
+                                  coef_name %in% c("marA", "soxS", "rob") ~ label_name,
+                                
+                                promoter == "pmarRAB" & 
+                                  chem_name %in% c("Azithromycin", "Clarithromycin", "Eritromycin", 
+                                                                       "Tetracycline", "Caffeine", "Salicylate", "Paraquat") &
+                                  coef_name %in% c("marA", "soxS", "rob", "Concentration") ~ label_name,
+                                
+                                TRUE ~ "")) %>% 
+  
+  dplyr::filter(coef_name %in% c("marA", "rob", "soxS", "Concentration"))
+
+
+significant_coefficients
+```  
+
+
+
+```{r}
+library(ggrepel)
+```
+  
+```{r vp.beta.all}
+
+vp.beta.all <- ggplot(significant_coefficients, aes(x=promoter, y=coef_value, label=label_name)) +
+  
+  
+  geom_violin(data = regression_result %>% dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs", "concentration")) %>% mutate(label_name=""), aes(x=promoter, y=coef_value)) +
+  
+   geom_jitter(data=subset(significant_coefficients, label_name == ""), color=alpha("#C5C5C5", 0.5), width = 0.15) +
+  
+  geom_point(data=subset(significant_coefficients, label_name != ""), aes(color=chem_name)) +
+   geom_text_repel(box.padding = 0.5, min.segment.length = 0, size=2.1, max.overlaps = Inf) +
+  theme_light() +
+  
+  theme(legend.position = "none")
+
+
+vp.beta.all
+ggsave(filename = path_target("all_beta_vp.png"), plot = vp.beta.all, dpi=300,  width = 14)
+```
+
+
+Look specifically at pmicF
+
+```{r}
+
+# micF 
+micf_betas <- ggplot(subset(significant_coefficients, promoter=="pmicF"), aes(x=promoter, y=coef_value, label=label_name)) +
+  
+  
+  geom_violin(data = regression_result %>% dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs", "concentration") & promoter == "pmicF") %>% mutate(label_name=""), aes(x=promoter, y=coef_value)) +
+  geom_jitter(data=subset(significant_coefficients, label_name == "" & promoter == "pmicF"), color="#C5C5C5", width = 0.15) +
+  
+  geom_point(data=subset(significant_coefficients, label_name != "" & promoter == "pmicF"), aes(color=chem_name), size=2) +
+  geom_text_repel(box.padding = 0.5, min.segment.length = 0.3, size=4, max.overlaps = Inf) +
+  
+  theme_light() +
+  
+  theme(legend.position = "none") +
+  
+  labs(x="Promoter", 
+       y="\u03b2 value",
+       title = "Model coefficient values")
+
+micf_betas
+ggsave(filename = path_target("micf_beta_vp.png"), plot = micf_betas, dpi=300)
+
+
+# marRAB
+marrab_betas <- ggplot(subset(significant_coefficients, promoter=="pmarRAB"), aes(x=promoter, y=coef_value, label=label_name)) +
+  
+  
+  geom_violin(data = regression_result %>% dplyr::filter(coef_name %in% c("t_rob", "t_mara", "t_soxs", "concentration") & promoter == "pmarRAB") %>% mutate(label_name=""), aes(x=promoter, y=coef_value)) +
+  geom_jitter(data=subset(significant_coefficients, label_name == "" & promoter == "pmarRAB"), color="#C5C5C5", width = 0.15) +
+  
+  geom_point(data=subset(significant_coefficients, label_name != "" & promoter == "pmarRAB"), aes(color=chem_name), size=2) +
+  geom_text_repel(box.padding = 0.5, min.segment.length = 0.3, size=4, max.overlaps = Inf) +
+  
+  theme_light() +
+  
+  theme(legend.position = "none") +
+  
+  labs(x="Promoter", 
+       y="\u03b2 value",
+       title = "Model coefficient values")
+
+marrab_betas
+ggsave(filename = path_target("marrab_beta_vp.png"), plot = marrab_betas, dpi=300)
+```
+
+
+
+## Write Files. 
+  
+```{r}
+write_tsv(regression_result, path_target("regression_result.tsv.gz"))
+write_tsv(wthresh.scores, path_target("expression_scores.tsv.gz"))
+```
+
+
+## Files written
+
+These files have been written to the target directory, `r paste0("data/", params$name)`:
+
+```{r list-files-target}
+projthis::proj_dir_info(path_target())
+```
+
+## Sesion Info
+```{r}
+sessioninfo::session_info()
+```
+
+

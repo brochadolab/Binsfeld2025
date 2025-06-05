@@ -1,0 +1,26 @@
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+# ecoli_regulator_screen_binsfeld25
+
+The goal this repository is to model CPI scores from [Binsfeld et al.,
+2025](https://www.biorxiv.org/content/10.1101/2024.08.26.609649v1) as a
+function of regulator presence/absence and compound concentration. This
+repository contains the workflow followed for noramlization, modeling
+and cross validation. This repository is found at
+[rolayoalarcon/ecoli_regulator_screen_binsfeld25](https://github.com/rolayoalarcon/ecoli_regulator_screen_binsfeld25).
+
+## Workflow.
+
+The `workflow` directory contains all Rmd files for this analysis. The
+complete workflow can be recreated with the following command:
+
+``` r
+projthis::proj_workflow_render("workflow")
+```
+
+See the description in this directory for more details.
+
+## CPI scores.
+
+The modeled CPI scores can be found in the `CPI_scores` directory.

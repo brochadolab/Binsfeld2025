@@ -1,0 +1,906 @@
+---
+title: "03-cross_validation"
+date: "Compiled at `r format(Sys.time(), '%Y-%m-%d %H:%M:%S', tz = 'UTC')` UTC"
+output: github_document
+params:
+  name: "03-cross_validation" # change if you rename file
+---
+
+```{r here, message=FALSE}
+here::i_am(paste0(params$name, ".Rmd"), uuid = "6ee83696-c9b5-4212-8ecb-395987467d72")
+```
+
+The purpose of this document is ...
+
+```{r packages}
+library(tidyverse)
+library(hierNet)
+```
+
+```{r directories}
+# create or *empty* the target directory, used to write this file's data: 
+projthis::proj_create_dir_target(params$name, clean = TRUE)
+
+# function to get path to target directory: path_target("sample.csv")
+path_target <- projthis::proj_path_target(params$name)
+
+# function to get path to previous data: path_source("00-import", "sample.csv")
+path_source <- projthis::proj_path_source(params$name)
+```
+
+## Read Data
+
+First we read in the scores that we normalised in the previous step. We can also get more information about the drugs by reading the Map.txt file.
+
+```{r read.data}
+
+normed_scores <- read_tsv(path_source("01-data_exploration", "qnormed_scores_complete.tsv.gz"), show_col_types = FALSE) %>%
+  mutate(promoter_rep = paste(promoter, replicate, sep="_"))
+
+
+map_file <- read_tsv(path_source("00-import", "Map.txt"), show_col_types = FALSE)
+
+
+```
+
+
+We can combine with the information we have in normed_scores
+```{r conc.info}
+concentration_info <- map_file %>% 
+  mutate(chem_conc = paste(Drug, ConcMock, sep=":")) %>% 
+  select(chem_conc, Conc)
+```
+
+
+
+```{r scores.show}
+
+normed_scores %>% 
+  head() %>% 
+  knitr::kable()
+
+map_file %>% 
+  head() %>% 
+  knitr::kable()
+```
+
+## Score exploration. 
+ 
+Now it becomes important to see how many measurements we have for a given prediction task. Say we want to evaluate the effect that caffeine has on micF. How many measurements do we have?
+At most, we have 32 examples given that for each promoter-compound pair we have 4 concentrations x 4 genotypes x 2 replicates
+
+
+
+Now, we know that some pairs, such as pmicF-Caffeine have large changes in gene expression due to different genetic backgrounds. In comparison, something like pmicF-Adrenalin almost does not change.
+
+```{r explore.scores.plot}
+
+
+explore_qnormed <- function(promoter_name, chemical_name, scores_df = normed_scores, score_column="value"){
+  
+  # Gather the correct scores
+  scores_df <- scores_df %>% 
+    rename("expression_scores" = all_of(score_column))
+  
+  
+  # Gather the data for the promoter compound
+  pchem.df <- scores_df %>% 
+  
+  filter(promoter == promoter_name,
+         chem_name == chemical_name) %>% 
+  
+  mutate(concentration = factor(concentration, levels=sort(unique(concentration))))
+  
+  
+  # Gather the data for the promoter
+  prom.df <- scores_df %>% 
+    filter(promoter == promoter_name)
+  
+  # Create plot
+  p <- ggplot(prom.df, aes(x=genotype_rep, y=expression_scores)) + 
+    geom_violin() +
+    geom_boxplot(width=0.1, fill="white", outlier.colour = alpha("black", 0.5)) +
+    
+    geom_line(data=pchem.df, aes(x=genotype_rep, y=expression_scores, color=concentration, group=chem_conc)) +
+    geom_point(data=pchem.df, aes(x=genotype_rep, y=expression_scores, color=concentration, group=chem_conc)) +
+    
+    theme_light() +
+    ggtitle(paste0(promoter_name, " - ", chemical_name))
+  
+  
+  return(p)
+  
+  
+  
+  
+}
+
+```
+
+
+```{r caff.micf.ex}
+explore_qnormed("pmarRAB", "A22")
+```
+  
+To account for these expected baseline changes I had proposed a soft-thresholding approach which I colloquially call water-normalisation. I explain that more in *r-02-expression_modelling*. Here I will just do it.
+  
+## Water signal soft-thresholding.  
+  
+
+
+```{r water.ranges}
+complete.wranges <- normed_scores %>% 
+  dplyr::filter(chem_name %in% c("Water_1", "Water_2")) %>% 
+  
+  group_by(promoter, genotype_rep) %>% 
+  
+  summarise(water_max = max(value),
+            water_min = min(value)) %>% 
+  
+  ungroup() %>% 
+  
+  unite(promoter, genotype_rep, col = "promoter_genotype_rep")
+```
+  
+Normalise scores  
+```{r wthresh}
+wthresh.scores <- normed_scores %>% 
+  unite(promoter, genotype_rep, col = "promoter_genotype_rep", remove = FALSE) %>% 
+  
+  left_join(complete.wranges, by="promoter_genotype_rep") %>% 
+  
+  # Normalise score values
+  mutate(value_normed = case_when(value <= water_max & value >= water_min ~ 0,
+                                  value > water_max ~ value - water_max,
+                                  value < water_min ~ value - water_min,
+                                  TRUE ~ value))
+```
+
+
+
+## Design matrix and response
+
+We can start to build $X$. 
+  
+```{r build.X}
+scores_with_design <- wthresh.scores %>% 
+  
+  # Treatment effects
+  mutate(t_rob = if_else(genotype == "drob", 0, 1),
+         
+         t_mara = if_else(genotype == "dmarA", 0, 1),
+         
+         t_soxs = if_else(genotype == "dsoxS", 0, 1),
+         
+         # Correct concentration scales
+         concentration = (concentration * -1) + 5,
+         concentration = 2 ^ (concentration - 1))
+```
+
+
+
+Build a function that returns the design matrix for a given promoter-compound pair.  
+
+
+```{r build.X.f}
+
+
+build_features <- function(promoter_name, chemical_name, score_column = "value_normed", score_df = scores_with_design, scale_value=TRUE){
+  
+  # Gather the appropiate values
+  X.df <- score_df %>% 
+    filter(promoter == promoter_name,
+           chem_name == chemical_name) %>% 
+    
+    rename("y" = all_of(score_column)) %>% 
+    
+    select(y, concentration, t_rob, t_mara, t_soxs)
+  
+  
+  if(scale_value == TRUE){
+    X.df <- X.df %>% 
+      mutate(y = scale(y),
+             y = if_else(is.na(y), 0, y))
+    
+    X.df$y <- X.df$y[,1]
+  }
+  
+  
+  return(X.df)
+
+}
+
+```
+
+
+## Cross validation. 
+
+Create a list of all the CPIs we want to model
+
+```{r cpi.list}
+cpi_of_interest <- scores_with_design %>% 
+  filter(!chem_name %in% c("Water_1", "Water_2"),
+         promoter != "EVC") %>% 
+  
+  select(chem_name, promoter) %>% 
+  distinct() %>% 
+  mutate(exp_combo = paste(promoter, chem_name, sep = ":")) %>% 
+  select(exp_combo) %>% 
+  unlist()
+```
+
+function for CPI modelling with CV
+  
+```{r cross.validation}
+
+colchecks <- function(X){
+  
+  # Make sure that there is more than one unique value in the "value" column.
+  
+  if(X %>% select(y) %>% n_distinct() == 1){
+    
+    return("no unique values")
+    
+  }
+  
+  
+  
+  # How many concentrations are tested
+  nconc <- X %>% 
+    select(concentration) %>% 
+    n_distinct()
+  
+  # If only one, then remove concentration column
+  if(nconc == 1){
+    
+    X <- X %>% 
+      select(-concentration)
+    
+  }
+  
+  return(X)
+  
+}
+
+r2 <- function(x,y){
+  cor(x,y)^2
+}
+
+model_evaluation <- function(hnet.obj, train.matrix, testing.matrix){
+  
+  
+  # Training error
+  yhat.train <- predict(hnet.obj, as.matrix(train.matrix[ 2:ncol(train.matrix)]))
+  r2.train <- r2(train.matrix$y, yhat.train)
+  
+  # Testing error
+  yhat.test <- predict(hnet.obj, as.matrix(testing.matrix[ 2:ncol(testing.matrix)]))
+  r2.test <- r2(testing.matrix$y, yhat.test)
+  
+  
+  return(c("train.error"=r2.train, "test.error"=r2.test))
+  
+}
+  
+  
+
+
+gather_model_coefficients <- function(hnet.obj, X){
+  
+  # Gather interaction matrix
+  imat <- hnet.obj$th
+  
+  # Interaction effects
+  colnames(imat) <- row.names(imat) <- colnames(as.matrix(X[, 2:ncol(X)]))
+  
+  # Main effects
+  main_effects <- hnet.obj$bp - hnet.obj$bn
+  names(main_effects) <- colnames(as.matrix(X[, 2:ncol(X)]))
+
+  # Replace for viz
+  for(v in names(main_effects)){
+  imat[v, v] = main_effects[v]
+  }
+  
+  # Set lower triangle to NA
+  imat[lower.tri(imat)] <- NA
+  
+  
+  # Format output into dataframe
+  estim_coefs <- as.data.frame(imat) %>% 
+    rownames_to_column("c1") %>% 
+    
+    # Pivot to longform
+    pivot_longer(cols = colnames(as.matrix(X[, 2:ncol(X)])),
+               names_to = "c2",
+               values_to = "coef_value") %>% 
+    
+    # Create meaningful coefficient names
+    mutate(coef_name = if_else(c1 == c2, c1, paste(c1, c2, sep=":"))) %>% 
+    
+    # Filter repeated interactions
+    dplyr::filter(!is.na(coef_value))
+  
+  return(estim_coefs)
+}
+
+
+final_fit <- function(X, cvobj, zz_mat){
+  
+  # Perform the final fit
+  final.fit.strong <- hierNet(y=X$y, 
+                              x=as.matrix(X[, 2:ncol(X)]),
+                              lam = cvobj$lamhat.1se, 
+                              strong = TRUE,
+                              diagonal = FALSE)
+                              #zz=zz_mat)
+  
+  
+  # Return the output
+  return(final.fit.strong)
+}
+
+
+
+fit.cv <- function(dmat, tmat, zz_mat, counter=0, maximum_lambda=NULL){
+  
+  # Perform HierNet
+  ## Fit path
+  set.seed(42)
+  path_fits <- hierNet.path(y=dmat$y, x=as.matrix(dmat[, 2:ncol(dmat)]), 
+                            maxlam = maximum_lambda, diagonal = FALSE)
+                            #zz=zz_mat)
+  
+  print("Problem at path fits")
+  
+  ## Cross-validation for lambda selection
+  hiernetcv <- hierNet.cv(fit = path_fits,
+           y=dmat$y, 
+           x=as.matrix(dmat[, 2:ncol(dmat)]),
+           nfolds = 4)
+  
+  # Check if the minimum lambda is simply the smallest lambda tested (usually is the case)
+  min_tested_is_lambdahat = min(hiernetcv$lamlist) == hiernetcv$lamhat
+  
+  # Re-do fit with adjusted lambda range
+  if(min_tested_is_lambdahat & counter < 5){
+    
+    fit.cv(dmat, tmat, zz_mat, counter = counter + 1, maximum_lambda=hiernetcv$lamhat.1se)
+    
+  }
+  
+  # Gather the final fit with the optimal lambda
+  hnet.final.fit <- final_fit(dmat, hiernetcv, zz_mat)
+  
+  # Evaluate on test set
+  hnet.performance <- model_evaluation(hnet.final.fit, dmat, tmat)
+  
+  # Gather model coeficients
+  estimated_coefficients <- gather_model_coefficients(hnet.final.fit, dmat) %>% 
+     mutate("lambda.min_is_smallest.lambda" = min_tested_is_lambdahat,
+           "lambda.value" = hiernetcv$lamhat.1se,
+           "train.rsq" = hnet.performance[["train.error"]],
+           "test.rsq" = hnet.performance[["test.error"]])
+  
+  return(estimated_coefficients)
+
+  
+}
+
+
+
+cpi.cv <- function(split_number, cpi_df, test_set_size=0.25){
+  
+  # Determine the number of samples in the test_set
+  nsamples_test <- round(nrow(cpi_df) * test_set_size)
+  
+  # Sample indices for the rows to be used for testing
+  set.seed(split_number)
+  test_indices <- sample(nrow(cpi_df), size = nsamples_test, replace = FALSE)
+  
+  # Training and testing CPI dataframes
+  cpi.testing <- cpi_df[test_indices,]
+  cpi.train <- cpi_df[-test_indices,]
+  
+  ## with passing zz we avoid that zz gets computed based on the scaled X which is not wanted for binary features
+  zz_binary <- compute.interactions.c(as.matrix(cpi_df[2:ncol(cpi_df)]), diagonal = FALSE)
+  zz_train <- zz_binary[-test_indices,]
+  
+  # Do the hierNet
+  tryCatch({
+    
+  hnet.results <- fit.cv(cpi.train, cpi.testing, zz_train)
+  # Add experiment information
+  hnet.results <- hnet.results %>% 
+    mutate(cvfold = split_number,
+           test_size=nsamples_test) %>% 
+    
+    select(-c("c1", "c2")) %>% 
+    pivot_wider(id_cols = c(cvfold, lambda.min_is_smallest.lambda, lambda.value, train.rsq, test.rsq, test_size), values_from = coef_value, names_from = coef_name)
+
+
+   return(hnet.results)
+    
+  },
+  error=function(e) {
+            message(paste("Error"))
+            print(e)
+        })
+  
+  
+}
+
+
+
+cpi.performance.cv <- function(cpi_string, n_splits=10, complete_design_matrix = scores_with_design, scale_response=TRUE, test_size=0.25){
+  
+  # Gather the promoter and the compound to be modelled
+  sep_list <- str_split(cpi_string, ":")[[1]]
+  gene <- sep_list[1]
+  compound <- sep_list[2]
+  
+  # Gather the design matrix
+  design_df <- build_features(promoter_name = gene, 
+                               chemical_name = compound, 
+                               score_column = "value_normed", 
+                               score_df = complete_design_matrix, 
+                               scale_value = scale_response)
+  
+  
+  # Check for concentration
+  # Some experiments only have one concentration, HierNet breaks in these cases so we need to remove it.
+  check.status <- colchecks(design_df)
+  
+  # Return empty dataframe if there are no unique values in the response columns
+  if(is.character(check.status)){
+    
+    if(check.status == "no unique values"){
+      
+      # Standard Output
+      hnet.results <- data.frame("cvfold" = NA,
+                                 "lambda.min_is_smallest.lambda" = NA,
+                                 "lambda.value" = NA,
+                                 "train.rsq" = NA,
+                                 "test.rsq" = NA,
+                                 "test_size" = NA,
+                                 "concentration" = NA,
+                                 "concentration:t_rob" = NA,
+                                 "concentration:t_mara" = NA,          
+                                 "concentration:t_soxs" = NA,
+                                 "t_rob" = NA,
+                                 "t_rob:t_mara" = NA,
+                                 "t_rob:t_soxs" = NA,
+                                 "t_mara" = NA,
+                                 "t_mara:t_soxs" = NA,
+                                 "t_soxs" = NA,
+                                 "promoter" = gene,
+                                 "chem_name" = compound,
+                                 "n_obs" = nrow(design_df)) 
+      
+
+    
+      return(hnet.results)
+      
+    }
+  }
+  
+  # Once the design matrix is ready, perform CV
+  #print(design_df)
+  
+  tryCatch({
+    #browser()
+    cv.results <- lapply(1:n_splits, cpi.cv, cpi_df = design_df, test_set_size=test_size)
+    cv.results <- cv.results[map_lgl(cv.results, is.data.frame)]
+    cv.results <- bind_rows(cv.results)
+    
+    
+    # Add info
+    cv.results <- cv.results %>% 
+    mutate(promoter=gene,
+           chem_name=compound,
+           
+           n_obs = nrow(design_df))
+  
+  
+  return(cv.results)
+    
+  },
+  error=function(e) {
+            message(paste("Error for CPI:", cpi_string))
+            print(e)
+            
+            # Standard Output
+            hnet.results <- data.frame("cvfold" = NA,
+                                 "lambda.min_is_smallest.lambda" = NA,
+                                 "lambda.value" = NA,
+                                 "train.rsq" = NA,
+                                 "test.rsq" = NA,
+                                 "test_size" = NA,
+                                 "concentration" = NA,
+                                 "concentration:t_rob" = NA,
+                                 "concentration:t_mara" = NA,          
+                                 "concentration:t_soxs" = NA,
+                                 "t_rob" = NA,
+                                 "t_rob:t_mara" = NA,
+                                 "t_rob:t_soxs" = NA,
+                                 "t_mara" = NA,
+                                 "t_mara:t_soxs" = NA,
+                                 "t_soxs" = NA,
+                                 "promoter" = gene,
+                                 "chem_name" = compound,
+                                 "n_obs" = nrow(design_df)) 
+            
+            
+            return(hnet.results)
+  }
+  
+  )
+  
+  
+  
+  
+}
+
+```
+
+Perform all CPI cross validations
+
+
+```{r parllelization}
+
+library(foreach)
+
+```
+
+
+
+  
+```{r cpi.cvs}
+
+doParallel::registerDoParallel(50)
+
+
+time_started <- proc.time()[3]
+
+
+cpi.cv.results <- foreach(i = cpi_of_interest, .combine = "bind_rows") %dopar% {
+  return(cpi.performance.cv(i))
+}
+time_ended <- proc.time()[3]
+
+time_diff <- round(time_ended - time_started, 2)
+minutes <- floor(time_diff / 60)
+minutes
+
+```
+  
+
+For some CPIs, no valid test-set could be create. This is mainly due to cases where there is little to no signal in the CPIscores. Therefore, after water normalisation, these scores become 0. 
+No valid model can be evaluated on these cases
+```{r}
+cpi.retest <- cpi.cv.results %>% 
+  group_by(promoter, chem_name) %>% 
+  filter(all(is.na(test.rsq))) %>% 
+  ungroup() %>% 
+  select(promoter, chem_name) %>% 
+  distinct() %>% 
+  unite("cpi_retest", c(promoter, chem_name), sep=":") %>% 
+  pull(cpi_retest)
+
+cpi.retest
+```
+
+```{r}
+explore_qnormed("pacrAB", "Ciprofloxacin", scores_df =wthresh.scores, score_column = "value_normed")
+```
+
+
+
+
+The function introduces placeholder columns. We can ignore those
+
+```{r fix.cv.results}
+cpi.cv.results <- cpi.cv.results %>%
+  mutate(promoter = substr(promoter, 2, nchar(promoter))) %>% 
+  select(-c(concentration.t_rob, concentration.t_mara, concentration.t_soxs, t_rob.t_mara, t_rob.t_soxs, t_mara.t_soxs))
+```
+
+
+
+## Average model performance  
+ 
+We consider the average R2 value for each CPI. Only folds where a valid model could be established, and the test set had a non-zero variance are considered.
+```{r average.performance}
+
+average.cv.performance <- cpi.cv.results %>% 
+  filter(!is.na(cvfold)) %>% 
+  group_by(promoter, chem_name) %>% 
+  summarise(avg.train.r2 = mean(train.rsq, na.rm=TRUE),
+            avg.test.r2 = mean(test.rsq, na.rm=TRUE),
+            sd.train.r2 = sd(train.rsq, na.rm=TRUE),
+            sd.test.r2 = sd(test.rsq, na.rm=TRUE)) %>% 
+  ungroup()
+
+```
+
+
+
+```{r}
+average.cv.performance %>% 
+  filter(is.na(avg.test.r2))
+```
+
+
+
+
+```{r cpis.of.interest}
+cpi.interest <- average.cv.performance %>% 
+  unite("cpi", c(promoter, chem_name), sep = ":", remove = FALSE) %>% 
+  
+  filter(cpi %in% c("soxS:Paraquat", "micF:Caffeine", "micF:Salicylate", "micF:Paraquat", "micF:Tetracycline"))
+```
+
+
+
+```{r labeled.dotplot}
+library(ggrepel)
+```
+
+
+```{r performance.r2}
+model.performance.p <- ggplot(average.cv.performance, aes(x=promoter, y=avg.test.r2)) +
+  
+  geom_violin() +
+  geom_boxplot(width=0.2) +
+  geom_point(alpha=0.5) +
+  
+  theme_bw() +
+  theme(axis.text.x = element_text(face="italic")) +
+  
+  geom_text_repel(data = cpi.interest, 
+                  aes(label=chem_name), 
+                  max.overlaps = Inf, size=3, 
+                  min.segment.length = 0, 
+                  color="black", 
+                  fontface="plain",
+                  point.padding = 0.2,
+                  box.padding = 0.2,
+                  segment.size=0.3,
+                  nudge_x = c(-0.5, 0.5, 0.5, -0.55, 0.5),
+                  nudge_y = c(0, 0, 0, 0.1, 0)) +
+  
+  labs(x="Promoter",
+       y=latex2exp::TeX("Average out-of-sample $R^2$"))
+
+
+model.performance.p
+ggsave(path_target("model_r2_10CV.pdf"),
+       plot = model.performance.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+
+ggsave(path_target("model_r2_10CV.png"),
+       plot = model.performance.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+```
+
+```{r non.scaled.response}
+doParallel::registerDoParallel(50)
+
+
+time_started <- proc.time()[3]
+
+
+cpi.cv.results.alt <- foreach(i = cpi_of_interest, .combine = "bind_rows") %dopar% {
+  return(cpi.performance.cv(i, scale_response = FALSE))
+}
+time_ended <- proc.time()[3]
+
+time_diff <- round(time_ended - time_started, 2)
+minutes <- floor(time_diff / 60)
+minutes
+```
+
+
+
+
+```{r non.scaled.performance}
+cpi.cv.results.alt <- cpi.cv.results.alt %>%
+    mutate(promoter = substr(promoter, 2, nchar(promoter))) %>% 
+select(-c(concentration.t_rob, concentration.t_mara, concentration.t_soxs, t_rob.t_mara, t_rob.t_soxs, t_mara.t_soxs))
+
+
+average.cv.performance.alt <- cpi.cv.results.alt %>% 
+  filter(!is.na(cvfold)) %>% 
+  group_by(promoter, chem_name) %>% 
+  summarise(avg.train.r2 = mean(train.rsq, na.rm=TRUE),
+            avg.test.r2 = mean(test.rsq, na.rm=TRUE)) %>% 
+  ungroup()
+
+cpi.interest <- average.cv.performance.alt %>% 
+  unite("cpi", c(promoter, chem_name), sep = ":", remove = FALSE) %>% 
+  
+  filter(cpi %in% c("soxS:Paraquat", "micF:Caffeine", "micF:Salicylate", "micF:Paraquat", "micF:Tetracycline"))
+
+
+model.performance.alt.p <- ggplot(average.cv.performance, aes(x=promoter, y=avg.test.r2)) +
+  
+  geom_violin() +
+  geom_boxplot(width=0.2) +
+  geom_point(alpha=0.5) +
+  
+  theme_bw() +
+  theme(axis.text.x = element_text(face="italic")) +
+  
+  geom_text_repel(data = cpi.interest, 
+                  aes(label=chem_name), 
+                  max.overlaps = Inf, size=3, 
+                  min.segment.length = 0, 
+                  color="black", 
+                  fontface="plain",
+                  point.padding = 0.2,
+                  box.padding = 0.2,
+                  segment.size=0.3,
+                  nudge_x = c(-0.5, 0.5, 0.5, -0.5, 0.5),
+                  nudge_y = c(0, 0, 0, 0.1, 0)) +
+  
+  labs(x="Promoter",
+       y=latex2exp::TeX("Average out-of-sample $R^2$"))
+
+model.performance.alt.p
+ggsave(path_target("model_r2_10CV_nonScaled.pdf"),
+       plot = model.performance.alt.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+
+ggsave(path_target("model_r2_10CV_nonScaled.png"),
+       plot = model.performance.alt.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+```
+
+  
+## Model coefficient distribution
+
+
+```{r rename.coefs}
+cpi.cv.results <- cpi.cv.results %>% 
+  rename("Concentration" = "concentration",
+         "rob" = "t_rob",
+         "soxS" = "t_soxs",
+         "marA" = "t_mara")
+```
+
+
+```{r coefs.interest}
+
+cpi.cv.interest <- cpi.cv.results %>% 
+  unite("cpi", c(promoter, chem_name), sep = " - ", remove = FALSE) %>% 
+  filter(cpi %in% c("soxS - Paraquat", "micF - Caffeine", "micF - Salicylate", "micF - Paraquat", "micF - Tetracycline")) %>% 
+  
+  select(cvfold, Concentration, rob, marA, soxS, cpi) %>% 
+  pivot_longer(cols=-c(cvfold, cpi), names_to = "coef_name", values_to = "coef_value")
+  
+  
+```
+
+
+
+```{r coef.plot}
+model.coefs.p <- ggplot(cpi.cv.interest, aes(x=coef_name, y=coef_value)) +
+  
+  geom_hline(yintercept = 0, linetype="longdash", color="black")+
+  geom_boxplot(width=0.2) +
+  geom_point(alpha=0.5, aes(fill=coef_name), shape=21, color="black") +
+  
+  scale_fill_manual(values = c("#fbdb9c", "#ec9370", "#48aa7d", "#556c9a")) +
+  
+  facet_wrap(~cpi, scales = "free_y") +
+  
+  theme_bw() +
+  labs(x=latex2exp::TeX("Model coefficient $\\beta$"),
+       y="Coefficient value") +
+  theme(legend.position = "none",
+        axis.text.x=element_text(angle=35, hjust=1, vjust = 1))
+
+
+model.coefs.p
+ggsave(path_target("model_betas_10CV.pdf"),
+       plot = model.coefs.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+
+ggsave(path_target("model_betas_10CV.png"),
+       plot = model.coefs.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+
+ggsave(path_target("model_betas_10CV.svg"),
+       plot = model.coefs.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+```
+
+
+```{r rename.coefs.alt}
+cpi.cv.results.alt <- cpi.cv.results.alt %>% 
+  rename("Concentration" = "concentration",
+         "rob" = "t_rob",
+         "soxS" = "t_soxs",
+         "marA" = "t_mara")
+```
+
+
+```{r coefs.interest.alt}
+
+cpi.cv.interest.alt <- cpi.cv.results.alt %>% 
+  unite("cpi", c(promoter, chem_name), sep = " - ", remove = FALSE) %>% 
+  filter(cpi %in% c("soxS - Paraquat", "micF - Caffeine", "micF - Salicylate", "micF - Paraquat", "micF - Tetracycline")) %>% 
+  
+  select(cvfold, Concentration, rob, marA, soxS, cpi) %>% 
+  pivot_longer(cols=-c(cvfold, cpi), names_to = "coef_name", values_to = "coef_value")
+```
+
+
+```{r coef.plot.alt}
+model.coefs.alt.p <- ggplot(cpi.cv.interest.alt, aes(x=coef_name, y=coef_value)) +
+  
+  geom_hline(yintercept = 0, linetype="longdash", color="black")+
+  geom_boxplot(width=0.2) +
+  geom_point(alpha=0.5, aes(fill=coef_name), shape=21, color="black") +
+  
+  scale_fill_manual(values = c("#fbdb9c", "#ec9370", "#48aa7d", "#556c9a")) +
+  
+  facet_wrap(~cpi, scales = "free_y") +
+  
+  theme_bw() +
+  labs(x=latex2exp::TeX("Model coefficient $\\beta$"),
+       y="Coefficient value") +
+  theme(legend.position = "none",
+        axis.text.x=element_text(angle=35, hjust=1, vjust = 1))
+
+model.coefs.alt.p
+
+ggsave(path_target("model_betas_10CV_nonScaled.pdf"),
+       plot = model.coefs.alt.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+
+ggsave(path_target("model_betas_10CV_nonScaled.png"),
+       plot = model.coefs.alt.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+
+ggsave(path_target("model_betas_10CV_nonScaled.svg"),
+       plot = model.coefs.alt.p,
+       dpi = 300,
+       height = 12, width = 21, units = "cm")
+```
+
+
+## Write results. 
+  
+```{r write.files}
+
+write_tsv(cpi.cv.results, path_target("results_10CV.tsv.gz"))
+write_tsv(cpi.cv.results.alt, path_target("results_10CV_nonScaled.tsv.gz"))
+
+```
+
+
+## Files written
+
+These files have been written to the target directory, ```r paste0("data/", params$name)```:
+
+```{r list-files-target}
+projthis::proj_dir_info(path_target())
+```
+
+
+## Session Info. 
+  
+```{r}
+sessionInfo()
+```
+
