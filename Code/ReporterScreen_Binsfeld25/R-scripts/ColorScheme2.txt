@@ -1,0 +1,6 @@
+Primary_color	Secondary_color1	Secondary_color2	Complement color
+shade 0	#D0921C	#139057	#D04D1C	#1E438B
+shade 1	#FFCF73	#50B386	#FF9973	#5774AD
+shade 2	#E6AE45	#2F9F6C	#E67045	#385999
+shade 3	#A8720B	#087443	#A8360B	#123270
+shade 4	#815400	#005930	#812300	#072256
